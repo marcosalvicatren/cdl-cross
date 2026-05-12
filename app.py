@@ -357,25 +357,18 @@ def fmt_data_fine_mese(mese_anno):
 # PARSER PDF  —  F24
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _imp_it(s):
-    try: return float(s.strip().replace(".","").replace(",","."))
+def _centesimi(s):
+    """Converte stringa intera di centesimi (es. '11285') in float (112.85)"""
+    try: return int(s) / 100
     except: return None
-
-def _imp_raw(s):
-    s = s.replace(".","")
-    if len(s) <= 2: return float("0."+s.zfill(2))
-    return float(s[:-2]+"."+s[-2:])
 
 def trova_pagina_f24(pdf_bytes):
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, page in enumerate(pdf.pages, 1):
             text = page.extract_text() or ""
-            if re.search(r'\b\d{4}\s+\d{1,2}\s+20\d{2}\s+[\d.]+,\d+', text):
-                if re.search(r'\b(1001|1701|1500|DM10|1627)\b', text):
+            if re.search(r'\b(1001|1704|1701|DM10|MET1|3802|3847|3848)\b', text):
+                if re.search(r'\b1500\s+DM10\b|\b\d{4}\s+\d{1,2}\s+20\d{2}\s+\d{3,6}\b', text):
                     return i
-            n = sum(1 for l in text.split("\n")
-                    if re.match(r'^\d{4}\s+\d{1,2}\s+20\d{2}\s+[\d.]+$', l.strip()))
-            if n >= 2: return i
     return None
 
 def parse_f24(pdf_bytes, page_num):
@@ -384,51 +377,63 @@ def parse_f24(pdf_bytes, page_num):
             raise ValueError(f"Pagina {page_num} non esiste")
         text = pdf.pages[page_num-1].extract_text() or ""
 
-    formato_it = bool(re.search(r'\b\d{4}\s+\d{1,2}\s+20\d{2}\s+[\d.]+,\d+', text))
+    # Estrai mese/anno dalla riga INPS (es. "1500 DM10 1519416621 012026 92800")
     mese_anno = ""
-    for line in text.split("\n"):
-        m = re.search(r'\b(\d{1,2})\s+(20\d{2})\b', line)
-        if m and not mese_anno:
-            try:
-                mm = int(m.group(1))
-                if 1 <= mm <= 12:
-                    nomi = ["","gennaio","febbraio","marzo","aprile","maggio","giugno",
-                            "luglio","agosto","settembre","ottobre","novembre","dicembre"]
-                    mese_anno = f"{nomi[mm].capitalize()} {m.group(2)}"
-            except: pass
+    m = re.search(r'1500\s+(?:DM10|MET1)\s+\d+\s+(\d{2})(\d{4})', text)
+    if m:
+        mm, yy = int(m.group(1)), m.group(2)
+        nomi = ["","gennaio","febbraio","marzo","aprile","maggio","giugno",
+                "luglio","agosto","settembre","ottobre","novembre","dicembre"]
+        if 1 <= mm <= 12:
+            mese_anno = f"{nomi[mm].capitalize()} {yy}"
 
-    IMP = r'[\d.]+,\d+'
-    righe_raw = []; sconosciuti = []
+    righe_raw = []
 
     for line in text.split("\n"):
         line = line.strip()
         if not line: continue
-        if formato_it:
-            m = re.search(r'\b(\d{4})\s+(\d{1,2})\s+(20\d{2})\s+('+IMP+r')\s*,', line)
-            if m:
-                imp = _imp_it(m.group(4))
-                if imp: righe_raw.append({"codice": m.group(1), "importo": imp}); continue
-            m = re.search(r'\b(\d{4})\s+(20\d{2})\s*,\s*('+IMP+r')', line)
-            if m:
-                imp = _imp_it(m.group(3))
-                if imp: righe_raw.append({"codice": m.group(1), "importo": imp}); continue
-            m = re.search(r'\b(\d+)\s+(\d{4})\s+(\d{1,2})\s+(20\d{2})\s+('+IMP+r')\s*,', line)
-            if m:
-                imp = _imp_it(m.group(5))
-                if imp: righe_raw.append({"codice": m.group(2), "importo": imp}); continue
-        else:
-            m = re.match(r'^(\d{4})\s+(\d{1,2})\s+(20\d{2})\s+([\d.]+)$', line)
-            if m: righe_raw.append({"codice": m.group(1), "importo": _imp_raw(m.group(4))}); continue
-            m = re.match(r'^(\d{4})\s+(20\d{2})\s+([\d.]+)$', line)
-            if m: righe_raw.append({"codice": m.group(1), "importo": _imp_raw(m.group(3))}); continue
 
-    voci = []
+        # SEZIONE ERARIO: CODICE mm AAAA importo_centesimi (solo debiti — no righe con +)
+        m = re.match(r'^(\d{4})\s+(\d{1,2})\s+(20\d{2})\s+(\d+)$', line)
+        if m:
+            imp = _centesimi(m.group(4))
+            if imp: righe_raw.append({"codice": m.group(1), "importo": imp}); continue
+
+        # SEZIONE INPS: 1500 DM10/MET1 matricola mmAAAA importo_centesimi
+        m = re.match(r'^1500\s+(DM10|MET1)\s+\d+\s+\d{6}\s+(\d+)$', line)
+        if m:
+            imp = _centesimi(m.group(2))
+            if imp: righe_raw.append({"codice": m.group(1), "importo": imp}); continue
+
+        # SEZIONE REGIONI: codice_regione CODICE mm AAAA importo_centesimi
+        m = re.match(r'^\d+\s+(\d{4})\s+(\d{1,2})\s+(20\d{2})\s+(\d+)$', line)
+        if m:
+            imp = _centesimi(m.group(4))
+            if imp: righe_raw.append({"codice": m.group(1), "importo": imp}); continue
+
+        # SEZIONE IMU/LOCALI: C293 CODICE mm AAAA importo_centesimi
+        m = re.match(r'^[A-Z]\d+\s+(\d{4})\s+(\d{1,2})\s+(20\d{2})\s+(\d+)$', line)
+        if m:
+            imp = _centesimi(m.group(4))
+            if imp: righe_raw.append({"codice": m.group(1), "importo": imp}); continue
+
+        # INAIL credito: 13200 codice c.c. periodo causale importo_centesimi
+        m = re.match(r'^13200\s+\S+\s+\d+\s+\S+\s+[A-Z]\s+(\d+)$', line)
+        if m:
+            imp = _centesimi(m.group(1))
+            if imp: righe_raw.append({"codice": "INAIL", "importo": imp}); continue
+
+        # Crediti erario: CODICE AAAA importo_centesimi (es. 6781 2025 997 = imp.sost.TFR credito)
+        m = re.match(r'^(\d{4})\s+(20\d{2})\s+(\d+)$', line)
+        if m:
+            imp = _centesimi(m.group(3))
+            if imp: righe_raw.append({"codice": m.group(1), "importo": imp, "credito": True}); continue
+
+    voci = []; sconosciuti = []
     for r in righe_raw:
         v = classifica_voce_f24(r["codice"], r["importo"])
-        if v:
-            voci.append(v)
-        else:
-            sconosciuti.append(r)
+        if v: voci.append(v)
+        else: sconosciuti.append(r)
 
     # Data pagamento = 16 del mese successivo
     data_pag = ""
