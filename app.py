@@ -265,7 +265,20 @@ def classifica_voce_bp(desc_pdf, da_pdf, importo):
         "regola":   "⚠ nessuna regola — compilare manualmente",
     }]
 
+# Lookup diretto per codici F24 estratti dalla sezione INPS (sempre esatti)
+_CODICI_FISSI_F24 = {
+    "DM10": {"desc_xml": "Saldo DM10",          "conto": "45200", "da": "D"},
+    "MET1": {"desc_xml": "METASALUTE c/azienda", "conto": "45424", "da": "D"},
+    "INAIL":{"desc_xml": "INAIL credito",        "conto": "45300", "da": "A"},
+}
+
 def classifica_voce_f24(codice, importo):
+    # 1. Corrispondenza esatta per codici INPS (DM10, MET1, INAIL)
+    if codice.upper() in _CODICI_FISSI_F24:
+        r = _CODICI_FISSI_F24[codice.upper()]
+        return {"codice": codice, "desc_xml": r["desc_xml"],
+                "importo": importo, "da": r["da"], "conto": r["conto"], "causale": "LA"}
+    # 2. Regole configurabili per tutto il resto
     codice_lower = codice.lower()
     for regola in st.session_state.regole_f24:
         if applica_regola(codice_lower, regola):
@@ -432,6 +445,9 @@ def parse_f24(pdf_bytes, page_num):
     voci = []; sconosciuti = []
     for r in righe_raw:
         v = classifica_voce_f24(r["codice"], r["importo"])
+        # Per crediti (es. 6781 imp.sost.TFR) inverti il segno
+        if v and r.get("credito"):
+            v["da"] = "A" if v["da"] == "D" else "D"
         if v: voci.append(v)
         else: sconosciuti.append(r)
 
